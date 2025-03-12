@@ -4,7 +4,7 @@ import uvicorn
 
 # 📌 Certifique-se de importar corretamente o router
 from routers.auth_routes import auth_router
-from routers.movies_routes import movies_router
+from routers.movies_routes import  router
 
 
 def create_application() -> FastAPI:
@@ -20,7 +20,7 @@ def create_application() -> FastAPI:
 
     # Incluindo os routers da API
     app.include_router(auth_router)  # 🔹 Sem prefixo duplicado
-    app.include_router(movies_router)
+    app.include_router(router)
 
     return app
 

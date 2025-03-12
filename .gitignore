@@ -1,46 +1,56 @@
-# 🔹 Ignorar arquivos do Python
+#  Ignorar banco de dados SQLite e seus arquivos temporários
+*.db
+*.db-journal
+
+#  Ignorar ambientes virtuais (venv, myenv, etc.)
+myenv/
+venv/
+.env
+*.env
+
+#  Ignorar dependências instaladas via pip
+__pycache__/
 *.pyc
 *.pyo
-__pycache__/
+*.pyd
+*.egg-info/
+
+#  Ignorar logs e arquivos temporários
+logs/
+*.log
+*.out
+*.bak
 *.swp
 *.swo
 *.swn
-venv/
-myenv/
+*.tmp
 
-# 🔹 Ignorar arquivos do banco de dados SQLite
-*.db
-*.sqlite
-*.sqlite3
+#  Ignorar datasets baixados
+ml-1m/
+ml-latest-small/
+datasets/
+data/
+*.zip
 
-# 🔹 Ignorar credenciais e configurações locais
-.env
-config.json
-secrets.json
+# Ignorar imagens e arquivos grandes
+images/
+*.jpg
+*.png
+*.gif
+*.mp4
+*.avi
 
-# 🔹 Ignorar logs e caches
-*.log
-logs/
-cache/
-*.pid
-
-# 🔹 Ignorar arquivos do Git LFS (caso você não use LFS)
-ml-32m/tags.csv
-ml-32m/ratings.csv
-
-# 🔹 Ignorar dependências e pacotes instalados
-*.egg-info/
-dist/
-build/
-node_modules/
-
-# 🔹 Ignorar arquivos temporários do editor
+# Ignorar configurações específicas do VS Code e IDEs
 .vscode/
 .idea/
 *.iml
-*.sublime-workspace
-*.sublime-project
 
-# 🔹 Ignorar arquivos do sistema operacional
+#  Ignorar Docker e arquivos de cache
+.dockerignore
+Dockerfile~
+docker-compose.override.yml
+
+# Ignorar arquivos do sistema operacional
 .DS_Store
 Thumbs.db
+desktop.ini
