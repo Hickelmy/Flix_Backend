@@ -2,70 +2,94 @@ import os
 import requests
 import zipfile
 import shutil
-import base64
 import pandas as pd
-from io import BytesIO
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime, Text
+import mysql.connector
+import re
+from sqlalchemy import create_engine, Column, Integer, String, DECIMAL, ForeignKey, DateTime, Text
 from sqlalchemy.orm import relationship, sessionmaker, DeclarativeBase
 from datetime import datetime
 
-# 📌 Configurações de diretórios e URLs
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
-DATASET_PATH = os.path.join(BASE_DIR, "ml-1m")
+# 🔹 Configuração do MySQL
+DB_USER = "root"
+DB_PASSWORD = "admin"
+DB_HOST = "localhost"
+DB_PORT = "3306"
+DB_NAME = "movielens"
 
-IMAGES_ZIP_URL = "https://github.com/antonsteenvoorden/ml1m-images/archive/refs/heads/master.zip"
-IMAGES_PATH = os.path.join(DATASET_PATH, "images")
+# 🔹 Criar banco de dados se não existir
+print("🔍 Verificando banco de dados MySQL...")
+conn = mysql.connector.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD)
+cursor = conn.cursor()
+cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
+conn.commit()
+conn.close()
+print(f"✅ Banco de dados `{DB_NAME}` pronto.")
 
-DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'movielens_1m.db')}"
+# 🔹 Conectar ao MySQL com SQLAlchemy
+DATABASE_URL = f"mysql+mysqlconnector://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# 📌 Definição da base ORM
+# 📌 Diretórios organizados
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MOVIELENS_DIR = os.path.join(DATA_DIR, "movielens")
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
+IMAGES_CSV = os.path.join(IMAGES_DIR, "ml1m-images-master", "ml1m_images.csv")
+
+DATASET_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
+IMAGES_ZIP_URL = "https://github.com/antonsteenvoorden/ml1m-images/archive/refs/heads/master.zip"
+
+# Criar pastas organizadas se não existirem
+os.makedirs(MOVIELENS_DIR, exist_ok=True)
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+
 class Base(DeclarativeBase):
     pass
+
 
 # 📌 Modelos do banco
 class Movie(Base):
     __tablename__ = "movies"
     id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, nullable=False)
+    title = Column(String(255), nullable=False)
     year = Column(Integer, nullable=True)
-    genres = Column(String, nullable=False)
-    image_base64 = Column(Text, nullable=True)
+    genres = Column(String(255), nullable=False)
+    image_base64 = Column(Text, nullable=True)  # 🔹 Agora armazena apenas o link da imagem
     ratings = relationship("Rating", back_populates="movie", cascade="all, delete")
+
 
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    gender = Column(String, nullable=False)
+    gender = Column(String(10), nullable=False)
     age = Column(Integer, nullable=False)
     occupation = Column(Integer, nullable=False)
-    zip_code = Column(String, nullable=False)
+    zip_code = Column(String(20), nullable=False)
     ratings = relationship("Rating", back_populates="user", cascade="all, delete")
+
 
 class Rating(Base):
     __tablename__ = "ratings"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     movie_id = Column(Integer, ForeignKey("movies.id", ondelete="CASCADE"), nullable=False)
-    rating = Column(Float, nullable=False)
+    rating = Column(DECIMAL(3, 2), nullable=False)
     timestamp = Column(DateTime, nullable=False)
+
     movie = relationship("Movie", back_populates="ratings")
     user = relationship("User", back_populates="ratings")
 
+
+# 📌 Criar tabelas no banco MySQL
 Base.metadata.create_all(bind=engine)
+print("✅ Estrutura do banco de dados criada.")
 
-# 📌 Função para verificar se os arquivos já estão disponíveis
-def files_exist():
-    return all(os.path.exists(os.path.join(DATASET_PATH, file)) for file in ["movies.dat", "users.dat", "ratings.dat"])
 
-def images_exist():
-    return os.path.exists(IMAGES_PATH) and len(os.listdir(IMAGES_PATH)) > 1000  # Verifica se há imagens suficientes
-
-# 📌 Função para baixar e extrair um ZIP
+# 📌 Baixar e extrair arquivos ZIP corretamente
 def download_and_extract_zip(url, extract_to):
-    zip_file_path = os.path.join(BASE_DIR, os.path.basename(url))  
+    zip_file_path = os.path.join(DATA_DIR, os.path.basename(url))
 
     if not os.path.exists(zip_file_path):
         print(f"📥 Baixando {url}...")
@@ -73,110 +97,108 @@ def download_and_extract_zip(url, extract_to):
         with open(zip_file_path, "wb") as file:
             file.write(response.content)
 
-    if not os.path.exists(extract_to):
-        os.makedirs(extract_to)
-
+    print(f"📦 Extraindo arquivos para {extract_to}...")
     with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
         zip_ref.extractall(extract_to)
 
-    extracted_folder = os.path.join(extract_to, "ml-1m")
-    if os.path.exists(extracted_folder):
-        for file in os.listdir(extracted_folder):
-            shutil.move(os.path.join(extracted_folder, file), extract_to)
-        shutil.rmtree(extracted_folder)
-
     print(f"✅ Arquivos extraídos em {extract_to}")
 
-# 📌 Função para converter imagens em Base64 e associá-las corretamente
-def convert_images_to_base64():
-    base64_images = {}
 
-    if not os.path.exists(IMAGES_PATH):
-        print(f"❌ ERRO: Pasta de imagens não encontrada em {IMAGES_PATH}")
-        return base64_images
+# 📌 Verificar se os arquivos já existem
+def files_exist():
+    return all(os.path.exists(os.path.join(MOVIELENS_DIR, file)) for file in ["movies.dat", "users.dat", "ratings.dat"])
 
-    for filename in os.listdir(IMAGES_PATH):
-        if filename.endswith(".jpg"):
-            movie_id = os.path.splitext(filename)[0]  
-            image_path = os.path.join(IMAGES_PATH, filename)
-            with open(image_path, "rb") as img_file:
-                base64_images[int(movie_id)] = base64.b64encode(img_file.read()).decode("utf-8")  
 
-    print(f"✅ {len(base64_images)} imagens convertidas para Base64.")
-    return base64_images
+def images_csv_exists():
+    return os.path.exists(IMAGES_CSV)
 
-# 📌 Função para carregar os arquivos `.dat`
+
+# 📌 Função para carregar arquivos `.dat`
 def load_dat_file(filename, delimiter="::", columns=None):
-    file_path = os.path.join(DATASET_PATH, filename)
+    file_path = os.path.join(MOVIELENS_DIR, filename)
 
     if not os.path.exists(file_path):
         print(f"❌ ERRO: Arquivo não encontrado: {file_path}")
         return None
 
-    try:
-        return pd.read_csv(file_path, delimiter=delimiter, header=None, names=columns, engine="python", encoding="ISO-8859-1")
-    except Exception as e:
-        print(f"❌ ERRO ao ler {filename}: {e}")
-        return None
+    return pd.read_csv(file_path, delimiter=delimiter, header=None, names=columns, engine="python", encoding="ISO-8859-1")
 
-# 📌 Função para extrair os dados do MovieLens
+
+# 📌 Função para carregar `ml1m_images.csv` e mapear os links das imagens
+def fetch_image_links():
+    if not images_csv_exists():
+        print("❌ ERRO: Arquivo ml1m_images.csv não encontrado!")
+        return {}
+
+    images_df = pd.read_csv(IMAGES_CSV)
+    images_dict = dict(zip(images_df["item_id"], images_df["image"]))
+
+    print(f"✅ {len(images_dict)} imagens vinculadas a filmes via URL.")
+    return images_dict
+
+
+# 📌 Extração de dados do MovieLens
+def extract_year_from_title(title):
+    """Extrai o ano do título do filme e retorna o título limpo e o ano."""
+    match = re.search(r"\((\d{4})\)", title)
+    year = int(match.group(1)) if match else None
+    clean_title = re.sub(r"\(\d{4}\)", "", title).strip()
+    return clean_title, year
+
+
 def extract_data():
     if not files_exist():
         print("📥 Baixando e extraindo arquivos do MovieLens...")
-        download_and_extract_zip(DATASET_URL, DATASET_PATH)
+        download_and_extract_zip(DATASET_URL, MOVIELENS_DIR)
 
-    if not images_exist():
+    if not images_csv_exists():
         print("📥 Baixando imagens...")
-        download_and_extract_zip(IMAGES_ZIP_URL, IMAGES_PATH)
+        download_and_extract_zip(IMAGES_ZIP_URL, IMAGES_DIR)
 
     print("🔄 Extraindo dados do MovieLens...")
-
     movies = load_dat_file("movies.dat", columns=["id", "title", "genres"])
     users = load_dat_file("users.dat", columns=["id", "gender", "age", "occupation", "zip_code"])
     ratings = load_dat_file("ratings.dat", columns=["user_id", "movie_id", "rating", "timestamp"])
 
-    if any(df is None for df in [movies, users, ratings]):
-        print("❌ ERRO: Um ou mais arquivos .dat não foram carregados corretamente.")
+    if any(df is None or df.empty for df in [movies, users, ratings]):
+        print("❌ ERRO: Arquivos não carregados corretamente ou vazios.")
         return None
+
+    ratings["timestamp"] = pd.to_datetime(ratings["timestamp"], unit="s")
+
+    # Extrair ano do título
+    movies["title"], movies["year"] = zip(*movies["title"].map(extract_year_from_title))
 
     return {"movies": movies, "users": users, "ratings": ratings}
 
-# 📌 Transformações
-def transform_movies(movies_df, base64_images):
-    # 🔹 Extração do ano e limpeza do título
-    movies_df["year"] = movies_df["title"].str.extract(r"\((\d{4})\)").fillna(0).astype(int)
-    movies_df["title"] = movies_df["title"].str.replace(r"\(\d{4}\)", "", regex=True).str.strip()
-    
-    # 🔹 Associação das imagens base64
-    movies_df["image_base64"] = movies_df["id"].map(base64_images).fillna("")  
-    return movies_df
 
-def transform_ratings(ratings_df):
-    ratings_df["timestamp"] = ratings_df["timestamp"].apply(lambda x: datetime.utcfromtimestamp(int(x)))
-    return ratings_df
-
-# 📌 Função para carregar os dados no banco de dados
+# 📌 Carregar dados no banco MySQL
 def load_data_to_db(data):
-    base64_images = convert_images_to_base64()
+    session = SessionLocal()
+    images_dict = fetch_image_links()
 
-    with SessionLocal() as session:
-        movies_df = transform_movies(data["movies"], base64_images)
-        session.bulk_insert_mappings(Movie, movies_df.to_dict(orient="records"))
-        session.commit()
+    for _, row in data["movies"].iterrows():
+        movie = session.query(Movie).filter_by(id=row["id"]).first()
+        if not movie:
+            session.add(Movie(
+                id=row["id"],
+                title=row["title"],
+                year=row["year"],
+                genres=row["genres"],
+                image_base64=images_dict.get(row["id"], None)
+            ))
+    session.commit()
+    session.close()
+    print("✅ Dados carregados no banco com sucesso!")
 
-        session.bulk_insert_mappings(User, data["users"].to_dict(orient="records"))
-        session.commit()
 
-        ratings_df = transform_ratings(data["ratings"])
-        session.bulk_insert_mappings(Rating, ratings_df.to_dict(orient="records"))
-        session.commit()
-
-# 📌 Função principal do ETL
+# 📌 Executar o ETL
 def run_etl():
     data = extract_data()
     if data:
         load_data_to_db(data)
+        print("✅ ETL finalizado com sucesso!")
 
-# 📌 Executar o ETL
+
 if __name__ == "__main__":
     run_etl()
