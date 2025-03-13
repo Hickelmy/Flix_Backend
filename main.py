@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware  # 🔹 Importar CORS Middlew
 from fastapi.openapi.utils import get_openapi
 import uvicorn
 
-# 📌 Certifique-se de importar corretamente o router
 from routers.auth_routes import auth_router
 from routers.movies_routes import  router
 
@@ -21,13 +20,12 @@ def create_application() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 🛑 Permitir todas as origens (pode restringir para "http://localhost:4200")
+        allow_origins=["*"],  
         allow_credentials=True,
-        allow_methods=["*"],  # 🛑 Permitir todos os métodos (POST, GET, etc.)
-        allow_headers=["*"],  # 🛑 Permitir todos os headers
+        allow_methods=["*"],  
+        allow_headers=["*"],
     )
-    # Incluindo os routers da API
-    app.include_router(auth_router)  # 🔹 Sem prefixo duplicado
+    app.include_router(auth_router)  
     app.include_router(router)
 
     return app

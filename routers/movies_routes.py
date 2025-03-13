@@ -7,22 +7,27 @@ from app import models, schemas, database
 
 router = APIRouter(prefix="/movies", tags=["Filmes"])
 
+
 def format_movie_response(movie: models.Movie, db: Session):
+    """
+    Retorna um dicionário formatado para um filme específico.
+    """
     return {
         "id": movie.id,
         "title": movie.title,
         "year": movie.year,
         "genres": movie.genres,
         "image_base64": movie.image_base64,
-        "rating": movie.average_rating(db)
+        "rating": movie.average_rating(db)  # Calcula a média de avaliação
     }
 
-# 🔹 1. Buscar filmes por título
+
+# 🔹 1️⃣ Buscar filmes por título, ano ou gênero
 @router.get("/", response_model=List[schemas.MovieResponse])
 def get_movies(
     title: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
-    genre: Optional[str] = Query(None),
+    genres: Optional[str] = Query(None),  # Alterado para "genres" em vez de "genre"
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(database.get_db),
@@ -33,8 +38,8 @@ def get_movies(
         query = query.filter(models.Movie.title.ilike(f"%{title}%"))
     if year:
         query = query.filter(models.Movie.year == year)
-    if genre:
-        query = query.filter(models.Movie.genres.ilike(f"%{genre}%"))
+    if genres:  # Alterado aqui
+        query = query.filter(models.Movie.genres.ilike(f"%{genres}%"))  # Alterado aqui
 
     movies = query.offset(offset).limit(limit).all()
 
@@ -43,9 +48,14 @@ def get_movies(
 
     return [format_movie_response(movie, db) for movie in movies]
 
-# 🔹 2. Buscar filme por ID
+
+
+# 🔹 2️⃣ Buscar filme por ID
 @router.get("/{movie_id}", response_model=schemas.MovieResponse)
 def get_movie(movie_id: int, db: Session = Depends(database.get_db)):
+    """
+    Retorna um filme específico pelo ID.
+    """
     movie = db.query(models.Movie).filter(models.Movie.id == movie_id).first()
 
     if not movie:
@@ -53,34 +63,17 @@ def get_movie(movie_id: int, db: Session = Depends(database.get_db)):
 
     return format_movie_response(movie, db)
 
-# 🔹 3. Buscar filmes por ano e gênero
-@router.get("/search/", response_model=List[schemas.MovieResponse])
-def search_movies(
-    year: int,
-    genre: str,
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(database.get_db),
-):
-    query = db.query(models.Movie).filter(
-        models.Movie.year == year,
-        models.Movie.genres.ilike(f"%{genre}%")
-    )
 
-    movies = query.offset(offset).limit(limit).all()
-
-    if not movies:
-        raise HTTPException(status_code=404, detail="Nenhum filme encontrado.")
-
-    return [format_movie_response(movie, db) for movie in movies]
-
-# 🔹 4. Listar os filmes mais bem avaliados
+# 🔹 3️⃣ Buscar filmes mais bem avaliados
 @router.get("/top-movies/", response_model=List[schemas.MovieResponse])
 def get_top_movies(
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
     db: Session = Depends(database.get_db),
 ):
+    """
+    Retorna os filmes mais bem avaliados.
+    """
     top_movies = (
         db.query(models.Movie)
         .join(models.Rating)
@@ -96,13 +89,17 @@ def get_top_movies(
 
     return [format_movie_response(movie, db) for movie in top_movies]
 
-# 🔹 5. Filmes populares (baseado na quantidade de avaliações e notas)
+
+# 🔹 4️⃣ Buscar filmes populares (mais avaliados)
 @router.get("/popular-movies/", response_model=List[schemas.MovieResponse])
 def get_popular_movies(
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
     db: Session = Depends(database.get_db),
 ):
+    """
+    Retorna os filmes mais populares baseados no número de avaliações.
+    """
     popular_movies = (
         db.query(models.Movie)
         .join(models.Rating)
@@ -121,12 +118,16 @@ def get_popular_movies(
 
     return [format_movie_response(movie, db) for movie in popular_movies]
 
-# 🔹 6. Filmes em alta (Trending Now) - Mais avaliados recentemente
+
+# 🔹 5️⃣ Buscar filmes em alta (Trending Now)
 @router.get("/trending-now/", response_model=List[schemas.MovieResponse])
 def get_trending_now(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(database.get_db),
 ):
+    """
+    Retorna os filmes mais recentes com avaliações.
+    """
     trending_movies = (
         db.query(models.Movie)
         .join(models.Rating)
@@ -141,45 +142,13 @@ def get_trending_now(
 
     return [format_movie_response(movie, db) for movie in trending_movies]
 
-# 🔹 7. Séries de TV (TV Shows)
-@router.get("/tv-shows/", response_model=List[schemas.MovieResponse])
-def get_tv_shows(
-    limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(database.get_db),
-):
-    tv_shows = (
-        db.query(models.Movie)
-        .filter(models.Movie.genres.ilike("%TV Show%"))
-        .limit(limit)
-        .all()
-    )
 
-    if not tv_shows:
-        raise HTTPException(status_code=404, detail="Nenhuma série de TV encontrada.")
-
-    return [format_movie_response(movie, db) for movie in tv_shows]
-
-# 🔹 8. Filmes de Ação & Aventura (Action & Adventure)
-@router.get("/action-adventure/", response_model=List[schemas.MovieResponse])
-def get_action_adventure(
-    limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(database.get_db),
-):
-    action_movies = (
-        db.query(models.Movie)
-        .filter(models.Movie.genres.ilike("%Action%"), models.Movie.genres.ilike("%Adventure%"))
-        .limit(limit)
-        .all()
-    )
-
-    if not action_movies:
-        raise HTTPException(status_code=404, detail="Nenhum filme de ação e aventura encontrado.")
-
-    return [format_movie_response(movie, db) for movie in action_movies]
-
-# 🔹 9. Estatísticas gerais dos filmes
+# 🔹 6️⃣ Estatísticas gerais dos filmes
 @router.get("/stats/", response_model=schemas.MovieStatsResponse)
 def get_movies_stats(db: Session = Depends(database.get_db)):
+    """
+    Retorna estatísticas gerais do banco de filmes.
+    """
     total_movies = db.query(models.Movie).count()
     total_ratings = db.query(models.Rating).count()
     avg_rating = db.query(func.avg(models.Rating.rating)).scalar()
