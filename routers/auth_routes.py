@@ -12,50 +12,50 @@ SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-# Contexto para criptografia de senhas
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Dependência para autenticação via JWT
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/login")
 
-# Inicialização do roteador
-auth_router = APIRouter(prefix="/auth", tags=["Autenticação"])
+auth_router = APIRouter(prefix="/users", tags=["Usuários"])
 
-# Função para criar um token JWT
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
 def create_access_token(username: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": username, "exp": expire}
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({"sub": username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
-# Função para obter usuário autenticado
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(database.get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token inválido ou expirado!",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
-            raise credentials_exception
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido ou expirado!")
     except JWTError:
-        raise credentials_exception
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido ou expirado!")
 
-    user = db.query(models.Login).filter(models.Login.username == username).first()
+    user = db.query(models.User).filter(models.User.username == username).first()
     if user is None:
-        raise credentials_exception
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuário não encontrado!")
+
     return user
 
-# Rota para registrar usuário na tabela `login`
 @auth_router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(user: UserCreate, db: Session = Depends(database.get_db)):
-    existing_user = db.query(models.Login).filter(models.Login.username == user.username).first()
-    if existing_user:
+    if db.query(models.User).filter(models.User.username == user.username).first():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuário já existe!")
 
-    hashed_password = pwd_context.hash(user.password)
-    new_user = models.Login(username=user.username, password_hash=hashed_password)
+    new_user = models.User(
+        username=user.username,
+        password_hash=hash_password(user.password),
+        gender="N/A",
+        age=0,
+        occupation=0,
+        zip_code="00000"
+    )
 
     db.add(new_user)
     db.commit()
@@ -63,18 +63,16 @@ def register(user: UserCreate, db: Session = Depends(database.get_db)):
 
     return new_user
 
-# Rota para login e geração de token JWT
 @auth_router.post("/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(database.get_db)):
-    db_user = db.query(models.Login).filter(models.Login.username == user.username).first()
+    db_user = db.query(models.User).filter(models.User.username == user.username).first()
 
-    if not db_user or not pwd_context.verify(user.password, db_user.password_hash):
+    if not db_user or not verify_password(user.password, db_user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciais inválidas!")
 
     token = create_access_token(db_user.username)
     return {"access_token": token, "token_type": "bearer"}
 
-# Rota para obter dados do usuário autenticado
 @auth_router.get("/me", response_model=UserResponse)
-def get_me(current_user: models.Login = Depends(get_current_user)):
+def get_me(current_user: models.User = Depends(get_current_user)):
     return current_user

@@ -2,111 +2,99 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
-
+import pandas as pd
+from pydantic import BaseModel
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+from scipy.sparse import csr_matrix
 from app import models, schemas, database
 
 router = APIRouter(prefix="/movies", tags=["Filmes"])
 
+_model_cache = None
+_user_movie_matrix = None
+_scaler = StandardScaler()
+
+class UserVote(BaseModel):
+    user_id: int
+    movie_id: int
 
 def format_movie_response(movie: models.Movie, db: Session):
-    """
-    Retorna um dicionário formatado para um filme específico.
-    """
     return {
         "id": movie.id,
         "title": movie.title,
         "year": movie.year,
         "genres": movie.genres,
         "image_base64": movie.image_base64,
-        "rating": movie.average_rating(db)  # Calcula a média de avaliação
+        "rating": movie.average_rating(db),
     }
 
-
-# 🔹 1️⃣ Buscar filmes por título, ano ou gênero
 @router.get("/", response_model=List[schemas.MovieResponse])
 def get_movies(
     title: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
-    genres: Optional[str] = Query(None),  # Alterado para "genres" em vez de "genre"
+    genres: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(database.get_db),
 ):
     query = db.query(models.Movie)
-
+    
     if title:
         query = query.filter(models.Movie.title.ilike(f"%{title}%"))
     if year:
         query = query.filter(models.Movie.year == year)
-    if genres:  # Alterado aqui
-        query = query.filter(models.Movie.genres.ilike(f"%{genres}%"))  # Alterado aqui
+    if genres:
+        query = query.filter(models.Movie.genres.ilike(f"%{genres}%"))
 
     movies = query.offset(offset).limit(limit).all()
-
     if not movies:
         raise HTTPException(status_code=404, detail="Nenhum filme encontrado.")
 
     return [format_movie_response(movie, db) for movie in movies]
 
-
-
-# 🔹 2️⃣ Buscar filme por ID
 @router.get("/{movie_id}", response_model=schemas.MovieResponse)
 def get_movie(movie_id: int, db: Session = Depends(database.get_db)):
-    """
-    Retorna um filme específico pelo ID.
-    """
     movie = db.query(models.Movie).filter(models.Movie.id == movie_id).first()
-
     if not movie:
         raise HTTPException(status_code=404, detail=f"Filme com ID {movie_id} não encontrado.")
-
     return format_movie_response(movie, db)
 
+@router.post("/like/")
+def like_movie(data: UserVote, db: Session = Depends(database.get_db)):
+    existing_like = db.query(models.Rating).filter(
+        models.Rating.user_id == data.user_id,
+        models.Rating.movie_id == data.movie_id
+    ).first()
 
-# 🔹 3️⃣ Buscar filmes mais bem avaliados
-@router.get("/top-movies/", response_model=List[schemas.MovieResponse])
-def get_top_movies(
-    limit: int = Query(10, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(database.get_db),
-):
-    """
-    Retorna os filmes mais bem avaliados.
-    """
-    top_movies = (
-        db.query(models.Movie)
-        .join(models.Rating)
-        .group_by(models.Movie.id)
-        .order_by(func.coalesce(func.avg(models.Rating.rating), 0).desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    if existing_like:
+        return {"message": "Você já curtiu esse filme!"}
 
-    if not top_movies:
-        raise HTTPException(status_code=404, detail="Nenhum filme com avaliações encontrado.")
+    db.add(models.Rating(user_id=data.user_id, movie_id=data.movie_id, rating=5))
+    db.commit()
 
-    return [format_movie_response(movie, db) for movie in top_movies]
+    return {"message": "Filme curtido com sucesso!"}
 
+@router.post("/dislike/")
+def dislike_movie(data: UserVote, db: Session = Depends(database.get_db)):
+    db.add(models.Rating(user_id=data.user_id, movie_id=data.movie_id, rating=0))
+    db.commit()
+    return {"message": "Filme descurtido!"}
 
-# 🔹 4️⃣ Buscar filmes populares (mais avaliados)
 @router.get("/popular-movies/", response_model=List[schemas.MovieResponse])
 def get_popular_movies(
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
     db: Session = Depends(database.get_db),
 ):
-    """
-    Retorna os filmes mais populares baseados no número de avaliações.
-    """
     popular_movies = (
         db.query(models.Movie)
         .join(models.Rating)
         .group_by(models.Movie.id)
         .order_by(
-            func.count(models.Rating.id).desc(), 
-            func.coalesce(func.avg(models.Rating.rating), 0).desc()
+            func.count(models.Rating.id).desc(),
+            func.coalesce(func.avg(models.Rating.rating), 0).desc(),
         )
         .offset(offset)
         .limit(limit)
@@ -119,50 +107,95 @@ def get_popular_movies(
     return [format_movie_response(movie, db) for movie in popular_movies]
 
 
-# 🔹 5️⃣ Buscar filmes em alta (Trending Now)
-@router.get("/trending-now/", response_model=List[schemas.MovieResponse])
-def get_trending_now(
-    limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(database.get_db),
-):
-    """
-    Retorna os filmes mais recentes com avaliações.
-    """
-    trending_movies = (
-        db.query(models.Movie)
-        .join(models.Rating)
-        .group_by(models.Movie.id)
-        .order_by(func.max(models.Rating.timestamp).desc())
-        .limit(limit)
-        .all()
+
+def train_collaborative_model(db):
+    ratings = db.query(models.Rating).all()
+
+    if not ratings:
+        return None  
+
+    df = pd.DataFrame([(r.user_id, r.movie_id, r.rating) for r in ratings], 
+                      columns=["user_id", "movie_id", "rating"])
+
+    if df.empty or len(df["user_id"].unique()) < 2:
+        return None  
+
+    user_movie_matrix = df.pivot(index="user_id", columns="movie_id", values="rating").fillna(0)
+    user_movie_matrix = user_movie_matrix.astype(np.float32)
+
+    sparse_matrix = csr_matrix(user_movie_matrix)
+
+    model = NearestNeighbors(metric="cosine", algorithm="brute")
+    model.fit(sparse_matrix)
+
+    return model, user_movie_matrix  
+
+def recommend_by_genre(user_id: int, db: Session):
+    last_liked_movie = (
+        db.query(models.Rating)
+        .filter(models.Rating.user_id == user_id)
+        .order_by(models.Rating.id.desc())
+        .first()
     )
 
-    if not trending_movies:
-        raise HTTPException(status_code=404, detail="Nenhum filme em alta encontrado.")
+    if not last_liked_movie:
+        return []
 
-    return [format_movie_response(movie, db) for movie in trending_movies]
+    liked_movie = db.query(models.Movie).filter(models.Movie.id == last_liked_movie.movie_id).first()
 
+    if not liked_movie:
+        return []
 
-# 🔹 6️⃣ Estatísticas gerais dos filmes
-@router.get("/stats/", response_model=schemas.MovieStatsResponse)
-def get_movies_stats(db: Session = Depends(database.get_db)):
-    """
-    Retorna estatísticas gerais do banco de filmes.
-    """
-    total_movies = db.query(models.Movie).count()
-    total_ratings = db.query(models.Rating).count()
-    avg_rating = db.query(func.avg(models.Rating.rating)).scalar()
-    most_popular_genres = (
-        db.query(models.Movie.genres, func.count(models.Movie.id))
-        .group_by(models.Movie.genres)
-        .order_by(func.count(models.Movie.id).desc())
+    similar_movies = (
+        db.query(models.Movie)
+        .filter(models.Movie.genres.ilike(f"%{liked_movie.genres.split('|')[0]}%"))
         .limit(5)
         .all()
     )
 
-    return {
-        "total_movies": total_movies,
-        "total_ratings": total_ratings,
-        "average_rating": round(avg_rating, 2) if avg_rating else None,
-        "top_genres": [genre for genre, count in most_popular_genres]
-    }
+    return similar_movies
+@router.get("/recommend/{user_id}")
+def recommend_movies(user_id: int, db: Session = Depends(database.get_db)):
+    global _model_cache, _user_movie_matrix
+
+    if _model_cache is None or _user_movie_matrix is None:
+        result = train_collaborative_model(db)
+        if result is None:
+            return recommend_by_genre(user_id, db)  
+        _model_cache, _user_movie_matrix = result  
+
+    liked_movies = db.query(models.Rating.movie_id).filter(
+        models.Rating.user_id == user_id,
+        models.Rating.rating == 5
+    ).all()
+
+    if not liked_movies:
+        return recommend_by_genre(user_id, db)  
+
+    liked_movie_ids = {movie.movie_id for movie in liked_movies}  
+
+    if user_id not in _user_movie_matrix.index:
+        return recommend_by_genre(user_id, db)  
+
+    user_index = list(_user_movie_matrix.index).index(user_id)
+    distances, indices = _model_cache.kneighbors([_user_movie_matrix.iloc[user_index]], n_neighbors=5)
+
+    similar_users = _user_movie_matrix.iloc[indices[0][1:]].mean()
+    recommended_movie_ids = [m for m in similar_users.sort_values(ascending=False).index.tolist() if m not in liked_movie_ids][:5]  
+
+    recommended_movies = db.query(models.Movie).filter(models.Movie.id.in_(recommended_movie_ids)).limit(5).all()
+
+    if not recommended_movies:
+        return recommend_by_genre(user_id, db)  
+
+    return [
+        {
+            "id": movie.id,
+            "title": movie.title,
+            "year": movie.year,
+            "genres": movie.genres,
+            "image_base64": movie.image_base64,
+            "tmdb_image": movie.tmdb_image
+        }
+        for movie in recommended_movies
+    ]
